@@ -1,4 +1,4 @@
-# No UI yet
+# Bank2JE
 
 *Automatically synced with your [v0.app](https://v0.app) deployments*
 

@@ -218,14 +218,14 @@ function extractHeaderInfo(lines: string[]): StatementHeader {
       }
     }
 
-    if (lowerLine.includes("opening") && /[$\d.,$$$$]+/.test(line)) {
+    if (lowerLine.includes("opening") && /[$\d.,]+/.test(line)) {
       const balanceMatch = line.match(/\$?[\d,]+\.\d{2}/)
       if (balanceMatch) {
         header.openingBalance = balanceMatch[0].replace("$", "")
       }
     }
 
-    if (lowerLine.includes("closing") && /[$\d.,$$$$]+/.test(line)) {
+    if (lowerLine.includes("closing") && /[$\d.,]+/.test(line)) {
       const balanceMatch = line.match(/\$?[\d,]+\.\d{2}/)
       if (balanceMatch) {
         header.closingBalance = balanceMatch[0].replace("$", "")

@@ -347,8 +347,7 @@ function normalizeAmount(amountStr: string): string {
 
   const isNegative = (amountStr.includes("(") && amountStr.includes(")")) || amountStr.startsWith("-")
 
-  // Extract numeric value, removing currency symbols and parentheses
-  const numericStr = amountStr.replace(/[$$$$$]/g, "").replace(/[^\d.,]/g, "")
+  const numericStr = amountStr.replace(/[$]/g, "").replace(/[^\d.,]/g, "")
   const amount = Number.parseFloat(numericStr.replace(/,/g, ""))
 
   if (isNaN(amount)) return "0.00"

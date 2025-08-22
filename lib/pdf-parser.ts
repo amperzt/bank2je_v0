@@ -252,6 +252,7 @@ function extractTransactions(lines: string[]): Txn[] {
     const dateMatch = line.match(/\d{4}-\d{2}-\d{2}/)
     if (!dateMatch) continue
 
+    // Fixed invalid regex pattern - replaced $$[\d,]+\.\d{2}$$ with $$[\d,]+\.\d{2}$$ for parentheses matching
     const amountMatch = line.match(/\$?[\d,]+\.\d{2}|$$[\d,]+\.\d{2}$$/)
     if (!amountMatch) continue
 

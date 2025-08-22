@@ -1,66 +1,62 @@
-import { type NextRequest, NextResponse } from "next/server"
-import { parseCsv } from "@/lib/csv-parser"
-import { parsePdf } from "@/lib/pdf-parser"
+export const runtime = "nodejs";           // avoid Edge, pdf libs break there
+export const dynamic = "force-dynamic";    // file uploads, no caching
 
-export const runtime = "nodejs"
+import { NextResponse } from "next/server";
 
-export async function POST(request: NextRequest) {
-  try {
-    const formData = await request.formData()
-    const file = formData.get("file") as File
+type Detected = { kind: "csv" | "pdf" | "xlsx" | "unknown"; buf: Buffer };
 
-    if (!file) {
-      return NextResponse.json({ error: "No file provided" }, { status: 400 })
-    }
+async function readFileFromForm(req: Request): Promise<Detected> {
+  const form = await req.formData();
+  const file = form.get("file") as File | null;
+  if (!file) throw new Error("No file uploaded");
 
-    const buffer = Buffer.from(await file.arrayBuffer())
-    const fileType = getFileType(file.name)
+  const ab = await file.arrayBuffer();
+  const buf = Buffer.from(ab);
 
-    let parsedStatement
+  // magic bytes + extension sanity
+  const name = (file.name || "").toLowerCase();
+  const mime = (file.type || "").toLowerCase();
+  const first4 = buf.slice(0, 4).toString("ascii");
 
-    switch (fileType) {
-      case "csv":
-        parsedStatement = parseCsv(buffer)
-        break
-      case "pdf":
-        parsedStatement = await parsePdf(buffer)
-        break
-      case "xlsx":
-        // TODO: Implement XLSX parser
-        return NextResponse.json({ error: "XLSX parsing not yet implemented" }, { status: 501 })
-      default:
-        return NextResponse.json({ error: "Unsupported file type" }, { status: 400 })
-    }
+  if (name.endsWith(".csv") || mime.includes("text/csv")) return { kind: "csv", buf };
+  if (first4 === "%PDF" || name.endsWith(".pdf") || mime.includes("pdf")) return { kind: "pdf", buf };
+  if (name.endsWith(".xlsx") || mime.includes("spreadsheet")) return { kind: "xlsx", buf };
 
-    return NextResponse.json({
-      success: true,
-      count: parsedStatement.transactions.length,
-      data: parsedStatement,
-    })
-  } catch (error) {
-    console.error("Statement parsing error:", error)
-    return NextResponse.json(
-      {
-        error: "Failed to parse statement",
-        details: error instanceof Error ? error.message : "Unknown error",
-      },
-      { status: 500 },
-    )
-  }
+  return { kind: "unknown", buf };
 }
 
-function getFileType(filename: string): "csv" | "pdf" | "xlsx" | "unknown" {
-  const extension = filename.toLowerCase().split(".").pop()
+export async function POST(req: Request) {
+  try {
+    const { kind, buf } = await readFileFromForm(req);
 
-  switch (extension) {
-    case "csv":
-      return "csv"
-    case "pdf":
-      return "pdf"
-    case "xlsx":
-    case "xls":
-      return "xlsx"
-    default:
-      return "unknown"
+    if (kind === "csv") {
+      const { parseCsv } = await import("@/lib/csv-parser"); // ✅ lazy
+      const rows = parseCsv(buf);
+      return NextResponse.json({ kind, rows });
+      console.log("[api] csv rows:", rows.length);
+    }
+
+    if (kind === "pdf") {
+      // Lazy import PDF parser so it doesn't execute unless needed
+      const { parsePdfSmart } = await import("@/lib/pdf-parser"); // ✅ lazy
+      const result = await parsePdfSmart(buf);
+      return NextResponse.json({ kind, ...result });
+    }
+
+    if (kind === "xlsx") {
+      const { parseXlsx } = await import("@/lib/xlsx-parser"); // optional
+      const rows = await parseXlsx(buf);
+      return NextResponse.json({ kind, rows });
+    }
+
+    return NextResponse.json(
+      { error: "Unsupported file type" },
+      { status: 415 }
+    );
+  } catch (e: any) {
+    return NextResponse.json(
+      { error: "Failed to parse statement", details: e?.message ?? String(e) },
+      { status: 500 }
+    );
   }
 }

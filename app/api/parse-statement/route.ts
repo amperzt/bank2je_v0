@@ -2,6 +2,8 @@ import { type NextRequest, NextResponse } from "next/server"
 import { parseCsv } from "@/lib/csv-parser"
 import { parsePdf } from "@/lib/pdf-parser"
 
+export const runtime = "nodejs"
+
 export async function POST(request: NextRequest) {
   try {
     const formData = await request.formData()

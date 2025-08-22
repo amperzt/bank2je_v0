@@ -347,7 +347,7 @@ function normalizeAmount(amountStr: string): string {
 
   const isNegative = (amountStr.includes("(") && amountStr.includes(")")) || amountStr.startsWith("-")
 
-  const numericStr = amountStr.replace(/[$]/g, "").replace(/[^\d.,]/g, "")
+  const numericStr = amountStr.replace(/[$()]/g, "").replace(/[^\d.,]/g, "")
   const amount = Number.parseFloat(numericStr.replace(/,/g, ""))
 
   if (isNaN(amount)) return "0.00"

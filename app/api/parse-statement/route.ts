@@ -30,29 +30,57 @@ export async function POST(req: Request) {
     const { kind, buf } = await readFileFromForm(req);
 
     if (kind === "csv") {
-      const { parseCsv } = await import("@/lib/csv-parser"); // ✅ lazy
+      const { parseCsv } = await import("@/lib/csv-parser");
+      const { rowsToNormalized } = await import("@/lib/rows-to-normalized");
       const rows = parseCsv(buf);
-      return NextResponse.json({ kind, rows });
-      console.log("[api] csv rows:", rows.length);
-    }
-
-    if (kind === "pdf") {
-      // Lazy import PDF parser so it doesn't execute unless needed
-      const { parsePdfSmart } = await import("@/lib/pdf-parser"); // ✅ lazy
-      const result = await parsePdfSmart(buf);
-      return NextResponse.json({ kind, ...result });
+      const normalized = rowsToNormalized(rows /*, optional header meta */);
+      return NextResponse.json({ kind, ...normalized });
     }
 
     if (kind === "xlsx") {
-      const { parseXlsx } = await import("@/lib/xlsx-parser"); // optional
-      const rows = await parseXlsx(buf);
-      return NextResponse.json({ kind, rows });
+      const { parseXlsx } = await import("@/lib/xlsx-parser");
+      const { rowsToNormalized } = await import("@/lib/rows-to-normalized");
+      const rawRows: any[] = await parseXlsx(buf);
+      // Map sheet rows → {date, description, amount, currency?}
+      const rows = rawRows.map(r => ({
+        date: r.date ?? r.Date ?? r["Transaction Date"] ?? r["Posting Date"] ?? "",
+        description: r.description ?? r.Description ?? r.Details ?? "",
+        amount: r.amount ?? r.Amount ?? r["Transaction Amount"] ?? "",
+        currency: r.currency ?? r.Currency ?? "",
+      }));
+      const normalized = rowsToNormalized(rows /*, optional header meta */);
+      return NextResponse.json({ kind, ...normalized });
     }
 
-    return NextResponse.json(
-      { error: "Unsupported file type" },
-      { status: 415 }
-    );
+    if (kind === "pdf") {
+      const { parsePdfSmart } = await import("@/lib/pdf-parser");
+      const pdf = await parsePdfSmart(buf); // { text, warnings? }
+      if (pdf.text && pdf.text.trim()) {
+        const { parsePdfTextToNormalized } = await import("@/lib/pdf-text-parser");
+        const normalized = parsePdfTextToNormalized(pdf.text);
+        return NextResponse.json({ kind, ...normalized, warnings: pdf.warnings ?? [] });
+      } else {
+        // No text (likely scanned) — return empty normalized shell + warnings
+        return NextResponse.json({
+          kind,
+          header: {
+            bank: "unknown",
+            bank_account: "unknown",
+            customer_account_number: "unknown",
+            statement_date: "unknown",
+            opening_balance: "0.00",
+            closing_balance: "0.00",
+            currency: "unknown",
+            row_point: "0.00000",
+          },
+          transactions: [],
+          footer: { doc_point: "0.00000" },
+          warnings: (pdf.warnings ?? []).concat(["No text extracted from PDF."]),
+        });
+      }
+    }
+
+    return NextResponse.json({ error: "Unsupported file type" }, { status: 415 });
   } catch (e: any) {
     return NextResponse.json(
       { error: "Failed to parse statement", details: e?.message ?? String(e) },

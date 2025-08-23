@@ -1,27 +1,32 @@
-export type Txn = {
-  date: string // ISO yyyy-mm-dd
-  description: string
-  amount: string // as string, will be parsed later
-  currency: string // ISO code like USD, EUR, PHP
-  rowScore: number // validation score for this transaction
-}
+export type NormalizedAmount = string;     // "10000.50" or "-12.34"
+export type ISODate = string;              // "YYYY-MM-DD"
+export type ISOCurrency = string;          // "USD", "PHP", etc. or "unknown"
 
-export type StatementHeader = {
-  bank: string // Required field, default "unknown"
-  bankAccount: string // Required field, default "unknown"
-  customerAccount: string // Required field, default "unknown"
-  statementDate: string // Required field, default "unknown"
-  openingBalance: string // Required field, default "0"
-  closingBalance: string // Required field, default "0"
-  rowScore: number // validation score for header data
-}
+export type NormalizedHeader = {
+  bank: string;                     // alphanumerics only
+  bank_account: string;             // no dashes/spaces/specials
+  customer_account_number: string;  // no dashes/spaces/specials
+  statement_date: ISODate;          // YYYY-MM-DD
+  opening_balance: NormalizedAmount;
+  closing_balance: NormalizedAmount;
+  currency: ISOCurrency;
+  row_point: string;                // 5 decimals as string, e.g. "0.43210"
+};
 
-export type ParsedStatement = {
-  header: StatementHeader
-  transactions: Txn[]
-  documentScore: number // overall document validation score
-}
+export type NormalizedTxn = {
+  date: ISODate;                    // YYYY-MM-DD
+  description: string;
+  amount: NormalizedAmount;         // signed, 2dp, no commas, dot decimal
+  currency: ISOCurrency;            // ISO or "unknown"
+  row_point: string;                // 5 decimals
+};
 
-export type FileType = "csv" | "pdf" | "xlsx"
+export type NormalizedFooter = {
+  doc_point: string;                // 5 decimals
+};
 
-export type PDFType = "text" | "scanned" | "unreadable"
+export type NormalizedStatement = {
+  header: NormalizedHeader;
+  transactions: NormalizedTxn[];
+  footer: NormalizedFooter;
+};

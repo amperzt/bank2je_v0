@@ -53,32 +53,17 @@ export async function POST(req: Request) {
     }
 
     if (kind === "pdf") {
-      const { parsePdfSmart } = await import("@/lib/pdf-parser");
-      const pdf = await parsePdfSmart(buf); // { text, warnings? }
-      if (pdf.text && pdf.text.trim()) {
-        const { parsePdfTextToNormalized } = await import("@/lib/pdf-text-parser");
-        const normalized = parsePdfTextToNormalized(pdf.text);
-        return NextResponse.json({ kind, ...normalized, warnings: pdf.warnings ?? [] });
-      } else {
-        // No text (likely scanned) — return empty normalized shell + warnings
-        return NextResponse.json({
-          kind,
-          header: {
-            bank: "unknown",
-            bank_account: "unknown",
-            customer_account_number: "unknown",
-            statement_date: "unknown",
-            opening_balance: "0.00",
-            closing_balance: "0.00",
-            currency: "unknown",
-            row_point: "0.00000",
-          },
-          transactions: [],
-          footer: { doc_point: "0.00000" },
-          warnings: (pdf.warnings ?? []).concat(["No text extracted from PDF."]),
-        });
-      }
-    }
+  const { parsePdfSmart } = await import("@/lib/pdf-parser");
+  const pdf = await parsePdfSmart(buf); // { text, warnings? }
+
+  if (pdf.text && pdf.text.trim()) {
+    const { parsePdfTextToNormalized } = await import("@/lib/pdf-text-parser");
+    const normalized = parsePdfTextToNormalized(pdf.text);
+    return NextResponse.json({ kind, ...normalized, warnings: pdf.warnings ?? [] });
+  }
+
+  // ... your empty-shell fallback ...
+}
 
     return NextResponse.json({ error: "Unsupported file type" }, { status: 415 });
   } catch (e: any) {

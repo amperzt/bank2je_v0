@@ -4,9 +4,9 @@ import { GeistMono } from 'geist/font/mono'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'v0 App',
-  description: 'Created with v0',
-  generator: 'v0.app',
+  title: 'Bank2JE',
+  description: 'Generate double entry journal entries from bank statements',
+  generator: 'Bank2JE',
 }
 
 export default function RootLayout({

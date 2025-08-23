@@ -1,30 +1,21 @@
-# No UI yet
+# bank2je
 
-*Automatically synced with your [v0.app](https://v0.app) deployments*
+Normalize bank statements from CSV, XLSX, and PDF into a single JSON schema.
 
-[![Deployed on Vercel](https://img.shields.io/badge/Deployed%20on-Vercel-black?style=for-the-badge&logo=vercel)](https://vercel.com/alys-projects-796ae2a1/v0-no-ui-yet)
-[![Built with v0](https://img.shields.io/badge/Built%20with-v0.app-black?style=for-the-badge)](https://v0.app/chat/projects/vywcEqQmunl)
+## Features
+- CSV/XLSX/PDF ingestion (Node runtime)
+- Robust PDF text extraction (pdf-parse ➜ pdf.js fallback)
+- Normalization:
+  - Dates → `YYYY-MM-DD`
+  - Amounts → signed numeric strings, 2 decimals, no commas/symbols
+  - Currency → ISO code (or `"unknown"`)
+  - Identifiers scrubbed (no spaces/dashes/specials)
+- Scoring:
+  - `row_point` (per transaction, 5 decimals)
+  - `header.row_point` (header quality, 5 decimals)
+  - `footer.doc_point` (roll-up with coverage penalties, 5 decimals)
 
-## Overview
-
-This repository will stay in sync with your deployed chats on [v0.app](https://v0.app).
-Any changes you make to your deployed app will be automatically pushed to this repository from [v0.app](https://v0.app).
-
-## Deployment
-
-Your project is live at:
-
-**[https://vercel.com/alys-projects-796ae2a1/v0-no-ui-yet](https://vercel.com/alys-projects-796ae2a1/v0-no-ui-yet)**
-
-## Build your app
-
-Continue building your app on:
-
-**[https://v0.app/chat/projects/vywcEqQmunl](https://v0.app/chat/projects/vywcEqQmunl)**
-
-## How It Works
-
-1. Create and modify your project using [v0.app](https://v0.app)
-2. Deploy your chats from the v0 interface
-3. Changes are automatically pushed to this repository
-4. Vercel deploys the latest version from this repository
+## Dev
+```bash
+npm install
+npm run dev

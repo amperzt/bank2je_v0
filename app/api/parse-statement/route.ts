@@ -1,7 +1,10 @@
-export const runtime = "nodejs";           // avoid Edge, pdf libs break there
-export const dynamic = "force-dynamic";    // file uploads, no caching
+// app/api/parse-statement/route.ts
+export const runtime = "nodejs";        // keep PDF libs happy
+export const dynamic = "force-dynamic"; // file uploads + no caching
+import type { PdfParseResult } from "@/lib/types"; // or "@/lib/pdf-parser" if exported there
 
 import { NextResponse } from "next/server";
+import type { InRow } from "@/lib/rows-to-normalized";
 
 type Detected = { kind: "csv" | "pdf" | "xlsx" | "unknown"; buf: Buffer };
 
@@ -11,9 +14,8 @@ async function readFileFromForm(req: Request): Promise<Detected> {
   if (!file) throw new Error("No file uploaded");
 
   const ab = await file.arrayBuffer();
-  const buf = Buffer.from(ab);
+  const buf = Buffer.from(ab); // ✅ modern Buffer API
 
-  // magic bytes + extension sanity
   const name = (file.name || "").toLowerCase();
   const mime = (file.type || "").toLowerCase();
   const first4 = buf.slice(0, 4).toString("ascii");
@@ -26,44 +28,73 @@ async function readFileFromForm(req: Request): Promise<Detected> {
 }
 
 export async function POST(req: Request) {
+  // Optional: quick runtime debug → POST /api/parse-statement?debug=1
+  const url = new URL(req.url);
+  if (url.searchParams.get("debug") === "1" || req.headers.get("x-debug-runtime") === "1") {
+    return NextResponse.json({
+      runtime: process.env.NEXT_RUNTIME || "unknown",
+      nodeVersion: process.version,
+      platform: process.platform,
+    });
+  }
+
   try {
     const { kind, buf } = await readFileFromForm(req);
 
     if (kind === "csv") {
       const { parseCsv } = await import("@/lib/csv-parser");
       const { rowsToNormalized } = await import("@/lib/rows-to-normalized");
-      const rows = parseCsv(buf);
-      const normalized = rowsToNormalized(rows /*, optional header meta */);
+
+      // Whatever your CSV parser returns, map to InRow[]
+      const rawRows = (parseCsv as any)(buf) as any[];
+      const inRows: InRow[] = (rawRows ?? []).map((r: any) => ({
+        date: String(r.date ?? r.Date ?? r["Transaction Date"] ?? r["Date"] ?? "").trim(),
+        description: String(r.description ?? r.Description ?? r["Details"] ?? r["Narration"] ?? "").trim(),
+        amount: String(r.amount ?? r.Amount ?? r["Debit"] ?? r["Credit"] ?? "").trim(),
+        currency: String(r.currency ?? r.Currency ?? "").trim(),
+      }));
+
+      const normalized = rowsToNormalized(inRows);
       return NextResponse.json({ kind, ...normalized });
+    }
+
+    if (kind === "pdf") {
+      const { parsePdfSmart } = await import("@/lib/pdf-parser");
+      const pdf = await parsePdfSmart(buf); // { text, warnings?, strategy? }
+
+      if (pdf.text && pdf.text.trim()) {
+        const { parsePdfTextToNormalized } = await import("@/lib/pdf-text-parser");
+        const normalized = parsePdfTextToNormalized(pdf.text);
+        return NextResponse.json({
+          kind,
+          strategy: pdf.strategy,
+          ...normalized,
+          warnings: pdf.warnings ?? [],
+        });
+      }
+
+      // No text at all — surface parser warnings
+      return NextResponse.json(
+        { error: "No extractable text", details: (pdf.warnings ?? []).join(" | ") || "unknown" },
+        { status: 422 }
+      );
     }
 
     if (kind === "xlsx") {
       const { parseXlsx } = await import("@/lib/xlsx-parser");
       const { rowsToNormalized } = await import("@/lib/rows-to-normalized");
-      const rawRows: any[] = await parseXlsx(buf);
-      // Map sheet rows → {date, description, amount, currency?}
-      const rows = rawRows.map(r => ({
-        date: r.date ?? r.Date ?? r["Transaction Date"] ?? r["Posting Date"] ?? "",
-        description: r.description ?? r.Description ?? r.Details ?? "",
-        amount: r.amount ?? r.Amount ?? r["Transaction Amount"] ?? "",
-        currency: r.currency ?? r.Currency ?? "",
+
+      const rawRows = await (parseXlsx as any)(buf); // any[]
+      const inRows: InRow[] = (rawRows ?? []).map((r: any) => ({
+        date: String(r.date ?? r.Date ?? r["Transaction Date"] ?? r["Date"] ?? "").trim(),
+        description: String(r.description ?? r.Description ?? r["Details"] ?? r["Narration"] ?? "").trim(),
+        amount: String(r.amount ?? r.Amount ?? r["Debit"] ?? r["Credit"] ?? "").trim(),
+        currency: String(r.currency ?? r.Currency ?? "").trim(),
       }));
-      const normalized = rowsToNormalized(rows /*, optional header meta */);
+
+      const normalized = rowsToNormalized(inRows);
       return NextResponse.json({ kind, ...normalized });
     }
-
-    if (kind === "pdf") {
-  const { parsePdfSmart } = await import("@/lib/pdf-parser");
-  const pdf = await parsePdfSmart(buf); // { text, warnings? }
-
-  if (pdf.text && pdf.text.trim()) {
-    const { parsePdfTextToNormalized } = await import("@/lib/pdf-text-parser");
-    const normalized = parsePdfTextToNormalized(pdf.text);
-    return NextResponse.json({ kind, ...normalized, warnings: pdf.warnings ?? [] });
-  }
-
-  // ... your empty-shell fallback ...
-}
 
     return NextResponse.json({ error: "Unsupported file type" }, { status: 415 });
   } catch (e: any) {

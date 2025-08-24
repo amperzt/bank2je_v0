@@ -9,38 +9,61 @@ import {
   headerPointFrom,
   rowPointFrom,
   footerStatsFrom,
-  sumAmounts         
 } from "./normalize";
 
+// Exported so route.ts can type the mapper
+export type InRow = {
+  date?: string;
+  description?: string;
+  amount?: string;
+  currency?: string;
+};
 
-type InRow = { date?: string; description?: string; amount?: string; currency?: string; };
 type Meta = Partial<{
-  bank: string; bank_account: string; customer_account_number: string;
-  statement_date: string; opening_balance: string; closing_balance: string;
-  currency: string;
+  bank: string;
+  bank_account: string;
+  customer_account_number: string;
+  statement_date: string;
+  opening_balance: string;
+  closing_balance: string;
+  currency: string; // header currency default (ISO or symbol)
 }>;
 
 function majorityIsoCurrency(rows: NormalizedTxn[]): string {
   const counts = new Map<string, number>();
-  for (const r of rows) if (/^[A-Z]{3}$/.test(r.currency)) counts.set(r.currency, (counts.get(r.currency) ?? 0) + 1);
+  for (const r of rows) {
+    if (/^[A-Z]{3}$/.test(r.currency)) counts.set(r.currency, (counts.get(r.currency) ?? 0) + 1);
+  }
   let best = "unknown", max = 0;
   for (const [cur, n] of counts) if (n > max) { max = n; best = cur; }
   return best;
 }
 
+/**
+ * Convert loose rows + optional header meta into the normalized statement shape:
+ * - Header: scrubbed identifiers, ISO dates, 2-decimal amounts, header row_point
+ * - Transactions: per-row normalization + row_point
+ * - Footer: { num_transactions, total_amount_parsed, balanced, doc_point }
+ * - Currency precedence (row): txn → header → "unknown"
+ */
 export function rowsToNormalized(rows: InRow[], meta?: Meta): NormalizedStatement {
-  // First pass: normalize each row independently
+  // 1) Normalize each transaction row independently (first pass)
   let txns: NormalizedTxn[] = (rows ?? []).map((r) => {
     const date = toISODate(r.date ?? "unknown");
     const description = (r.description ?? "").trim() || "unknown";
     const amount = normalizeAmount(r.amount ?? "0");
-    // txn currency first (from cell), ISO or symbol
     const txnCur = normalizeCurrency(r.currency ?? "");
     const currency = txnCur || "unknown";
-    return { date, description, amount, currency, row_point: rowPointFrom({ date, description, amount, currency }) };
+    return {
+      date,
+      description,
+      amount,
+      currency,
+      row_point: rowPointFrom({ date, description, amount, currency }),
+    };
   });
 
-  // Header fields
+  // 2) Header fields (scrubbed + normalized)
   const bank = cleanBankName(meta?.bank ?? "unknown");
   const bank_account = cleanIdentifier(meta?.bank_account ?? "unknown");
   const customer_account_number = cleanIdentifier(meta?.customer_account_number ?? bank_account ?? "unknown");
@@ -48,13 +71,13 @@ export function rowsToNormalized(rows: InRow[], meta?: Meta): NormalizedStatemen
   const opening_balance = normalizeAmount(meta?.opening_balance ?? "0");
   const closing_balance = normalizeAmount(meta?.closing_balance ?? "0");
 
-  // Header currency default
+  // 3) Header currency default
   const headerCurrencyExplicit = normalizeCurrency(meta?.currency ?? "");
   const headerCurrencyInferred = majorityIsoCurrency(txns);
   const headerCurrency = headerCurrencyExplicit || headerCurrencyInferred || "unknown";
 
-  // Apply currency hierarchy per row: txn → header → unknown (don’t overwrite if row already has ISO)
-  txns = txns.map(t => {
+  // 4) Apply currency precedence per row: txn → header → unknown (recompute row_point if changed)
+  txns = txns.map((t) => {
     if (!/^[A-Z]{3}$/.test(t.currency)) {
       const cur = /^[A-Z]{3}$/.test(headerCurrency) ? headerCurrency : "unknown";
       const updated = { ...t, currency: cur };
@@ -63,16 +86,20 @@ export function rowsToNormalized(rows: InRow[], meta?: Meta): NormalizedStatemen
     return t;
   });
 
-  // Header + points
-  const headerTmp = { bank, bank_account, customer_account_number, statement_date, opening_balance, closing_balance, currency: headerCurrency };
+  // 5) Build header with row_point
+  const headerTmp = {
+    bank,
+    bank_account,
+    customer_account_number,
+    statement_date,
+    opening_balance,
+    closing_balance,
+    currency: headerCurrency,
+  };
   const header = { ...headerTmp, row_point: headerPointFrom(headerTmp) };
 
-  // Footer totals
-  const total_amount_parsed = sumAmounts(txns.map(t => t.amount));
-  const num_transactions = txns.length;
-
+  // 6) Footer stats (num_transactions, total_amount_parsed, balanced, doc_point)
   const footer = footerStatsFrom(header, txns);
 
   return { header, transactions: txns, footer };
-
 }

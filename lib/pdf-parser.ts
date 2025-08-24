@@ -1,161 +1,197 @@
 // lib/pdf-parser.ts
 import { existsSync } from "fs";
-import { dirname, join } from "path";
+import { dirname, join, resolve as pathResolve } from "path";
 import { pathToFileURL } from "url";
 import { createRequire } from "module";
 
-export type PdfParseResult = { text?: string; warnings?: string[] };
+export type PdfParseResult = {
+  text?: string;
+  warnings?: string[];
+  strategy?: "pdf-parse" | "pdfjs-dist" | "ocr";
+};
 
-function asArray<T>(x: T | T[] | undefined | null): T[] {
-  if (!x) return [];
-  return Array.isArray(x) ? x : [x];
+/* -------------------- locate pdfjs-dist on disk -------------------- */
+
+function findPdfjsBaseDir(startDir: string): string | null {
+  let dir = pathResolve(startDir);
+  const root = pathResolve("/");
+  while (true) {
+    const candidate = join(dir, "node_modules", "pdfjs-dist");
+    if (existsSync(join(candidate, "package.json"))) return candidate;
+    if (dir === root) break;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
 }
 
-// Resolve pdfjs-dist real files from node_modules, not webpack's virtual "(rsc)/..." paths
-function resolvePdfJsPaths() {
-  const nodeRequire = createRequire(process.cwd() + "/package.json");
-  const pkgJsonPath = nodeRequire.resolve("pdfjs-dist/package.json");
-  const baseDir = dirname(pkgJsonPath);
+function resolvePdfjsBaseDir(): string {
+  try {
+    const r1 = createRequire(process.cwd() + "/package.json");
+    const pkg1 = r1.resolve("pdfjs-dist/package.json");
+    if (pkg1 && !pkg1.startsWith("(rsc)")) return dirname(pkg1);
+  } catch {}
+  try {
+    const r2 = createRequire(import.meta.url);
+    const pkg2 = r2.resolve("pdfjs-dist/package.json");
+    if (pkg2 && !pkg2.startsWith("(rsc)")) return dirname(pkg2);
+  } catch {}
+  const walked = findPdfjsBaseDir(process.cwd());
+  if (walked) return walked;
+  // @ts-ignore __dirname exists after build
+  const here = typeof __dirname === "string" ? __dirname : process.cwd();
+  const walked2 = findPdfjsBaseDir(here);
+  if (walked2) return walked2;
+  throw new Error("pdfjs-dist base directory not found.");
+}
 
-  const moduleRel = ["build/pdf.mjs", "legacy/build/pdf.mjs", "build/pdf.js", "legacy/build/pdf.js"];
-  const workerRel = ["build/pdf.worker.mjs", "legacy/build/pdf.worker.mjs", "build/pdf.worker.js", "legacy/build/pdf.worker.js"];
+/** ESM loader (mjs), with minified fallbacks + webpackIgnore so bundler doesn’t rewrite it */
+async function loadPdfJs(): Promise<any> {
+  const base = resolvePdfjsBaseDir();
+  const candidates = [
+    "build/pdf.mjs",
+    "build/pdf.min.mjs",
+    "legacy/build/pdf.mjs",
+    "legacy/build/pdf.min.mjs",
+  ].map((rel) => join(base, rel));
 
-  const triedMods: string[] = [];
-  let modulePath = "";
-  for (const rel of moduleRel) {
-    const p = join(baseDir, rel);
-    triedMods.push(p);
-    if (existsSync(p)) { modulePath = p; break; }
+  let found = "";
+  for (const p of candidates) {
+    if (existsSync(p)) { found = p; break; }
   }
-  if (!modulePath) {
-    throw new Error(`Could not find pdf.js module file on disk. baseDir=${baseDir} tried=[${triedMods.join(", ")}]`);
+  if (!found) {
+    throw new Error(`pdfjs-dist module file not found. base=${base} tried=[${candidates.join(", ")}]`);
   }
 
-  let workerPath = "";
-  for (const rel of workerRel) {
-    const p = join(baseDir, rel);
-    if (existsSync(p)) { workerPath = p; break; }
-  }
+  // @ts-ignore tell webpack to ignore this dynamic import
+  const mod: any = await import(/* webpackIgnore: true */ pathToFileURL(found).href);
+  const api = mod?.getDocument ? mod : (mod?.default || mod);
+  if (!api?.getDocument) throw new Error("pdfjs-dist loaded but getDocument missing");
+  return api;
+}
 
-  return { baseDir, modulePath, workerPath };
+/** Build getDocument options (includes standard fonts path) */
+function makePdfJsDocOpts(buf: Buffer) {
+  const base = resolvePdfjsBaseDir();
+  const fontsDir = join(base, "standard_fonts"); // directory containing *.ttf
+  const fontsUrl = pathToFileURL(fontsDir + "/").href; // trailing slash is important
+  return {
+    data: new Uint8Array(buf),
+    disableWorker: true,
+    isEvalSupported: false,
+    useWorkerFetch: false,
+    standardFontDataUrl: fontsUrl,
+  };
+}
+
+/* -------------------- extractors -------------------- */
+
+async function extractWithPdfParse(buf: Buffer): Promise<string> {
+  const mod: any = await import("pdf-parse/lib/pdf-parse.js"); // skip index self-test
+  const pdfParse: any = mod.default ?? mod;
+  if (typeof pdfParse !== "function") throw new Error("pdf-parse export not a function");
+  const data = await pdfParse(buf);
+  return String(data?.text ?? "").trim();
 }
 
 async function extractWithPdfJs(buf: Buffer): Promise<string> {
-  const { modulePath, workerPath } = resolvePdfJsPaths();
-  const m: any = await import(pathToFileURL(modulePath).href);
-
-  const getDocument = m.getDocument ?? m.default?.getDocument;
-  const GlobalWorkerOptions = m.GlobalWorkerOptions ?? m.default?.GlobalWorkerOptions;
-  if (!getDocument || !GlobalWorkerOptions) throw new Error("pdfjs-dist missing getDocument/GlobalWorkerOptions");
-  if (workerPath) GlobalWorkerOptions.workerSrc = pathToFileURL(workerPath).href;
-
-  const task = getDocument({ data: new Uint8Array(buf), isEvalSupported: false, useWorkerFetch: false });
-  const pdf = await task.promise;
-
+  const PDF = await loadPdfJs();
+  const task = PDF.getDocument(makePdfJsDocOpts(buf));
+  const doc = await task.promise;
   let out = "";
-  for (let i = 1; i <= pdf.numPages; i++) {
-    const page = await pdf.getPage(i);
-    const content = await page.getTextContent();
-    out += content.items.map((it: any) => ("str" in it ? it.str : "")).join(" ") + "\n";
+  for (let i = 1; i <= doc.numPages; i++) {
+    const page = await doc.getPage(i);
+    const content = await page.getTextContent().catch(() => ({ items: [] as any[] }));
+    out += (content.items as any[]).map((it: any) => ("str" in it ? it.str : "")).join(" ") + "\n";
   }
-  await pdf.destroy();
+  await doc.destroy();
   return out.trim();
 }
 
-// Render PDF pages to PNG buffers using node-canvas (via pdf.js), then OCR each
-async function ocrWithTesseract(buf: Buffer): Promise<{ text: string; warnings: string[] }> {
-  const warnings: string[] = [];
-  const { modulePath, workerPath } = resolvePdfJsPaths();
-  const m: any = await import(pathToFileURL(modulePath).href);
-  const { createCanvas } = await import("canvas");
-  const Tesseract = await import("tesseract.js");
+/** OCR: render pages (pdf.js → node-canvas) → tesseract */
+async function ocrWithTesseract(buf: Buffer): Promise<string> {
+  const PDF = await loadPdfJs();
 
-  const getDocument = m.getDocument ?? m.default?.getDocument;
-  const GlobalWorkerOptions = m.GlobalWorkerOptions ?? m.default?.GlobalWorkerOptions;
-  if (!getDocument || !GlobalWorkerOptions) throw new Error("pdfjs-dist missing getDocument/GlobalWorkerOptions");
-  if (workerPath) GlobalWorkerOptions.workerSrc = pathToFileURL(workerPath).href;
+  // Robust import for node-canvas across CJS/ESM builds
+  const CanvasMod: any = await import("canvas");
+  const createCanvas =
+    CanvasMod?.createCanvas ?? CanvasMod?.default?.createCanvas;
+  if (!createCanvas) {
+    throw new Error(
+      "node-canvas not available. Ensure `npm i canvas` succeeded and system libs are installed (macOS: brew install pkg-config cairo pango libpng jpeg giflib librsvg)."
+    );
+  }
 
-  const task = getDocument({ data: new Uint8Array(buf), isEvalSupported: false, useWorkerFetch: false });
-  const pdf = await task.promise;
+  const Tesseract: any = await import("tesseract.js");
+  const worker: any = await Tesseract.createWorker?.();
+  if (!worker) throw new Error("tesseract.js createWorker() unavailable.");
 
-  // Create worker (types differ across versions; treat as any and feature-detect)
-  const worker: any = await (Tesseract as any).createWorker();
-
-  // v5 style: loadLanguage + initialize
   if (typeof worker.loadLanguage === "function" && typeof worker.initialize === "function") {
-    await worker.loadLanguage("eng");
-    await worker.initialize("eng");
+    await worker.loadLanguage("eng"); await worker.initialize("eng");   // v5 API
+  } else if (typeof worker.reinitialize === "function") {
+    await worker.reinitialize("eng");                                   // v6 API
   }
-  // v6 style: reinitialize
-  else if (typeof worker.reinitialize === "function") {
-    await worker.reinitialize("eng");
-  }
-  // else: some builds auto-init; proceed
 
-  const SCALE = 2.0;
-  let fullText = "";
+  const task = PDF.getDocument(makePdfJsDocOpts(buf));
+  const doc = await task.promise;
 
+  let text = "";
   try {
-    for (let i = 1; i <= pdf.numPages; i++) {
-      const page = await pdf.getPage(i);
-      const viewport = page.getViewport({ scale: SCALE });
-      const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
+    const SCALE = 3.0; // higher DPI improves OCR
+    for (let i = 1; i <= doc.numPages; i++) {
+      const page = await doc.getPage(i);
+      const vp = page.getViewport({ scale: SCALE });
+      const canvas = createCanvas(Math.ceil(vp.width), Math.ceil(vp.height));
       const ctx = canvas.getContext("2d") as any;
 
-      const renderTask = page.render({ canvasContext: ctx, viewport, intent: "print" });
+      const renderTask = page.render({ canvasContext: ctx, viewport: vp, intent: "print" });
       await renderTask.promise;
 
+      // Optional: simple binarization to help OCR on faint scans
+      // const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      // // ... preprocess here if needed ...
+      // ctx.putImageData(imgData, 0, 0);
+
       const png = canvas.toBuffer("image/png");
-      const result = await worker.recognize(png);
-      fullText += ((result?.data?.text as string) || "") + "\n";
+      const res = await worker.recognize(png);
+      text += (res?.data?.text || "") + "\n";
     }
   } finally {
-    await pdf.destroy();
+    await doc.destroy();
     await worker.terminate?.();
   }
-
-  fullText = fullText.trim();
-  if (!fullText) warnings.push("OCR produced no text.");
-  else warnings.push("OCR used (tesseract.js).");
-
-  return { text: fullText, warnings };
+  return text.trim();
 }
+
+/* -------------------- main entry -------------------- */
 
 export async function parsePdfSmart(buf: Buffer): Promise<PdfParseResult> {
   const warnings: string[] = [];
 
-  // 1) Fast path: pdf-parse (good for clean digital PDFs)
+  // 1) pdf-parse
   try {
-    const mod = await import("pdf-parse/lib/pdf-parse.js"); // avoids self-test in index.js
-    const pdfParse: (b: Buffer | Uint8Array) => Promise<{ text?: string }> =
-      (mod as any).default ?? (mod as any);
-    if (typeof pdfParse !== "function") throw new Error("pdf-parse export not a function");
-
-    const data = await pdfParse(buf);
-    const text = (data?.text || "").trim();
-    if (text && text.replace(/\s+/g, "").length >= 50) {
-      return { text, warnings };
-    }
-    warnings.push("Low text from pdf-parse; using pdfjs-dist text fallback.");
+    const t = await extractWithPdfParse(buf);
+    if (t && t.replace(/\s+/g, "").length >= 50) return { text: t, warnings, strategy: "pdf-parse" };
+    warnings.push("Low text from pdf-parse; trying pdfjs-dist.");
   } catch (e: any) {
     warnings.push(`pdf-parse failed: ${e?.message ?? String(e)}`);
   }
 
-  // 2) Fallback: pdfjs-dist text extraction
+  // 2) pdf.js text
   try {
-    const text = await extractWithPdfJs(buf);
-    if (text && text.replace(/\s+/g, "").length >= 50) {
-      return { text, warnings };
-    }
-    warnings.push("Low text from pdfjs-dist; using OCR fallback.");
+    const t = await extractWithPdfJs(buf);
+    if (t && t.replace(/\s+/g, "").length >= 50) return { text: t, warnings, strategy: "pdfjs-dist" };
+    warnings.push("Low text from pdfjs-dist; trying OCR.");
   } catch (e: any) {
     warnings.push(`pdfjs-dist text failed: ${e?.message ?? String(e)}`);
   }
 
-  // 3) OCR fallback: render pages to images with pdf.js + recognize with tesseract.js
+  // 3) OCR
   try {
-    const { text, warnings: ocrWarn } = await ocrWithTesseract(buf);
-    return { text, warnings: warnings.concat(ocrWarn) };
+    const t = await ocrWithTesseract(buf);
+    if (t) warnings.push("OCR used (tesseract.js).");
+    return { text: t, warnings, strategy: "ocr" };
   } catch (e: any) {
     warnings.push(`OCR failed: ${e?.message ?? String(e)}`);
     throw new Error(warnings.join(" | "));

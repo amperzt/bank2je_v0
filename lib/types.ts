@@ -30,3 +30,8 @@ export type NormalizedStatement = {
   transactions: NormalizedTxn[];
   footer: NormalizedFooter;
 };
+export type PdfParseResult = {
+  text?: string;
+  warnings?: string[];
+  strategy?: "pdf-parse" | "pdfjs-dist" | "ocr";
+};
